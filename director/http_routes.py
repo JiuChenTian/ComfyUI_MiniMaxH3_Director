@@ -735,6 +735,61 @@ async def minimax_seed_records_write(request):
         return web.Response(status=500, text=str(exc))
 
 
+async def minimax_seed_records_stamp(request):
+    """Queue-time「最新使用」stamp: the frontend records the seed the moment a
+    run is queued, so the chip still updates when the run dies before the
+    Director node ever executes (e.g. a missing model upstream).
+
+    ``POST /minimax/director/seed_records/stamp``
+    body ``{node_id, cache_name, stamps: [{recordId, index, seed}, ...]}``.
+    Read-modify-write per row — never wipes an existing 已跑完 value.
+    """
+    try:
+        body = await request.json()
+    except ValueError:
+        return web.Response(status=400, text="Invalid JSON body.")
+    if not isinstance(body, dict):
+        return web.Response(status=400, text="Invalid body shape.")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+
+    from .segment_cache import resolve_segment_cache_key, update_segment_seed_record
+
+    cache_key = resolve_segment_cache_key(body.get("cache_name"), node_id)
+    if not cache_key:
+        return web.Response(status=400, text="Invalid segment cache name.")
+
+    stamps = body.get("stamps")
+    if not isinstance(stamps, list):
+        return web.Response(status=400, text="stamps must be a list.")
+    stamped = 0
+    for row in stamps:
+        if not isinstance(row, dict):
+            continue
+        try:
+            seed = int(row.get("seed"))
+        except (TypeError, ValueError):
+            continue
+        idx = row.get("index")
+        try:
+            idx = int(idx) if idx is not None else None
+        except (TypeError, ValueError):
+            idx = None
+        record_id = str(row.get("recordId") or "").strip()
+        if not record_id and idx is None:
+            continue
+        try:
+            update_segment_seed_record(
+                cache_key, record_id, idx, seed, phase="used"
+            )
+            stamped += 1
+        except Exception:
+            continue
+    return web.json_response({"stamped": stamped})
+
+
 def _register_route(routes, method: str, path: str, handler) -> None:
     if hasattr(routes, "add_route"):
         routes.add_route(method, path, handler)
@@ -804,6 +859,12 @@ def register_routes() -> bool:
         "POST",
         "/minimax/director/seed_records/write",
         minimax_seed_records_write,
+    )
+    _register_route(
+        routes,
+        "POST",
+        "/minimax/director/seed_records/stamp",
+        minimax_seed_records_stamp,
     )
     from .pack import minimax_download_pack, minimax_export_pack, minimax_import_pack
 

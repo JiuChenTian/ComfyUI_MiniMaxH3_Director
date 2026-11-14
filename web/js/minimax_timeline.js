@@ -3199,6 +3199,8 @@ class MiniMaxH3DirectorEditor {
                             <span class="bd-label" data-i18n="panel.prompt">提示词</span>
                             <textarea class="bd-prompt" data-r="global-prompt" data-i18n-placeholder="placeholder.globalPrompt" placeholder=""></textarea>
                             <textarea class="bd-prompt bd-prompt-negative hidden" data-r="global-negative" hidden aria-hidden="true"></textarea>
+                            <span class="bd-label" data-r="global-seg-prompt-label" data-i18n="panel.segPromptOverride" hidden>片段提示词（覆盖全局）</span>
+                            <textarea class="bd-prompt" data-r="global-seg-prompt" rows="4" data-i18n-placeholder="placeholder.segPromptOverride" hidden></textarea>
                         </div>
                     </div>
                     <div class="bd-gen-fc-row hidden" data-r="gen-global-fc-row">
@@ -3359,6 +3361,8 @@ class MiniMaxH3DirectorEditor {
         this.r2vCommonToggle = this.root.querySelector('[data-r="r2v-common-toggle"]');
         this.segmentPanel = this.root.querySelector('[data-r="segment-panel"]');
         this.globalPrompt = this.root.querySelector('[data-r="global-prompt"]');
+        this.globalSegPromptLabel = this.root.querySelector('[data-r="global-seg-prompt-label"]');
+        this.globalSegPrompt = this.root.querySelector('[data-r="global-seg-prompt"]');
         this.globalNegative = this.root.querySelector('[data-r="global-negative"]');
         this.globalPromptLayout = this.root.querySelector('[data-r="global-prompt-layout"]');
         this.segPromptLayout = this.root.querySelector('[data-r="seg-prompt-layout"]');
@@ -3620,6 +3624,16 @@ class MiniMaxH3DirectorEditor {
         }
         this.globalTask.onchange = () => this.onGlobalField("taskType", this.globalTask.value);
         this.globalPrompt.oninput = () => this.onGlobalField("prompt", this.globalPrompt.value);
+        // Per-segment prompt override shown under the global prompt (v2v etc):
+        // a non-empty segment prompt wins over the global one at plan time.
+        if (this.globalSegPrompt) {
+            this.globalSegPrompt.oninput = () => {
+                const seg = this.timeline?.segments?.[this.selectedIndex ?? 0];
+                if (!seg) return;
+                seg.prompt = this.globalSegPrompt.value;
+                this.commit(false, { syncTimeline: true });
+            };
+        }
         if (this.mixedT2vPrompt) {
             this.mixedT2vPrompt.oninput = () => {
                 if (this.getTaskKey() !== "mixed") return;
@@ -4555,6 +4569,56 @@ class MiniMaxH3DirectorEditor {
                     indices,
                 }),
             }).catch(() => { /* best effort */ });
+        } catch {
+            /* best effort */
+        }
+    }
+
+    /**
+     * Queue-time「最新使用」stamp: record the seed on every participating
+     * segment the moment a run is queued, so the chip reflects the last
+     * attempt even when the run dies before the Director node executes
+     * (missing model, bad preview override, …). User rule: 最新 = 最后一次
+     * 跑视频用的随机种，无论是否跑成功. Fire-and-forget; the executor still
+     * refreshes the same value at attempt start.
+     */
+    stampQueueSeed() {
+        const timeline = this.timeline;
+        if (!timeline || this.isGenImage?.()) return;
+        const seed = Math.trunc(Number(this.widget("seed")?.value));
+        if (!Number.isFinite(seed)) return;
+        this.ensureRecordIds();
+        const bucket = this.isFl2vMode() ? timeline.shots || [] : timeline.segments || [];
+        let indices = bucket.map((_, i) => i);
+        if (this.isRunSelectEnabled()) {
+            const selected = (Array.isArray(timeline.runSelection) ? timeline.runSelection : [])
+                .filter((i) => Number.isInteger(i) && i >= 0 && i < bucket.length);
+            if (selected.length) indices = selected;
+        }
+        const stamps = [];
+        for (const index of indices) {
+            const seg = bucket[index];
+            if (!seg) continue;
+            stamps.push({ recordId: seg.recordId || null, index, seed });
+            if (seg.recordId) {
+                this._seedRecordsById = this._seedRecordsById || {};
+                this._seedRecordsById[seg.recordId] = { ...(this._seedRecordsById[seg.recordId] || {}), used: seed };
+            }
+        }
+        if (!stamps.length) return;
+        this.renderImageBatchGroups?.();
+        this.scheduleRender?.();
+        this.syncSegmentSeedUI?.();
+        try {
+            api.fetchApi("/minimax/director/seed_records/stamp", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    node_id: String(this.node.id),
+                    cache_name: this.widget("cache_name")?.value ?? null,
+                    stamps,
+                }),
+            }).catch(() => { /* next run re-stamps */ });
         } catch {
             /* best effort */
         }
@@ -6887,6 +6951,23 @@ class MiniMaxH3DirectorEditor {
         if (!show) { wrap.textContent = ""; return; }
         wrap.textContent = `${t("batch.seedLabel")} ${bits.join(" / ")}`;
         wrap.title = t("tooltip.batchSeedRecord");
+    }
+
+    /**
+     * Per-segment prompt override shown under the global prompt in 全局模式
+     * (v2v 只有全局提示词的痛点)：非空时该片段用它，留空沿用全局。
+     */
+    syncSegmentPromptOverrideUI() {
+        if (!this.globalSegPrompt) return;
+        const show = this.isGlobalMode() && !this.isFl2vMode() && !this.isGenImage();
+        if (this.globalSegPromptLabel) this.globalSegPromptLabel.hidden = !show;
+        this.globalSegPrompt.hidden = !show;
+        if (!show) return;
+        const idx = this.selectedIndex ?? 0;
+        const seg = (this._previewSegments || this.timeline?.segments)?.[idx];
+        const value = seg?.prompt || "";
+        if (this.globalSegPrompt.value !== value) this.globalSegPrompt.value = value;
+        if (this.globalSegPromptLabel) this.globalSegPromptLabel.title = t("tooltip.segPromptOverride");
     }
 
     /** Apply ResolutionSelector → fixed width/height on timeline + node widgets. */
@@ -11450,6 +11531,8 @@ class MiniMaxH3DirectorEditor {
 
         if (this.usesGlobalRefPanel()) {
             this.syncSegmentRefImageSizeUI();
+            this.syncSegmentPromptOverrideUI();
+            this.syncSegmentSeedUI();
             return;
         }
 
@@ -11459,6 +11542,7 @@ class MiniMaxH3DirectorEditor {
         this.segLabel.textContent = t("panel.segmentN", { n: this.selectedIndex + 1 });
         this.syncSegmentContinuityFromPrevUI();
         this.syncSegmentRefImageSizeUI();
+        this.syncSegmentSeedUI();
         this._updateSegInfoFromSegment(liveSeg);
         this.segPrompt.value = liveSeg.prompt || "";
         if (taskUsesReferenceImages(segKey)) {
@@ -13519,10 +13603,17 @@ app.registerExtension({
                 node._minimaxEditor?.flushTimelineSync?.();
             }
         };
+        const stampDirectors = () => {
+            const graph = app.graph ?? app.canvas?.graph;
+            for (const node of graph?._nodes ?? graph?.nodes ?? []) {
+                node._minimaxEditor?.stampQueueSeed?.();
+            }
+        };
         if (app.queuePrompt && !app.queuePrompt._minimaxPatched) {
             const orig = app.queuePrompt.bind(app);
             app.queuePrompt = function (...args) {
                 flushDirectors();
+                stampDirectors();
                 clearAllDirectorRunStatus();
                 return orig(...args);
             };

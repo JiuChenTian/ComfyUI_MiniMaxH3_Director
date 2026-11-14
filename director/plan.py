@@ -889,7 +889,9 @@ def build_director_plan(
 
     for idx, (start, end, seg_data) in enumerate(segment_ranges):
         if edit_mode == "global":
-            seg_prompt = prompt
+            # 全局模式也允许片段级覆盖：片段提示词非空时优先于全局提示词
+            # （v2v/i2v 等全局工作台下也能逐段改写）。留空 = 沿用全局。
+            seg_prompt = (seg_data.get("prompt") or "").strip() or prompt
             seg_task = task_type
             seg_refs = list(global_refs)
             seg_ref_audios = list(global_ref_audios)

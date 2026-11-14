@@ -694,6 +694,10 @@ def build_fl2v_director_plan(
                     segment_index=plan_index,
                 ),
                 loras=normalize_lora_rows(shot.get("loras") if isinstance(shot, dict) else None),
+                # Seed ledger identity: shot recordId + the shot's own index so
+                # 最新/已跑完 rows survive reordering and per-shot run-select.
+                record_id=str(shot.get("recordId") or "") if isinstance(shot, dict) else "",
+                ui_index=int(shot.get("source_index") or 0) if isinstance(shot, dict) else None,
             )
         )
         plan_index += 1

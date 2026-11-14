@@ -1,4 +1,4 @@
-﻿/** Director prompt @-mentions + official-tag token chips (<Picture N> / <Video K> / <Audio J>).
+/** Director prompt @-mentions + official-tag token chips (<Picture N> / <Video K> / <Audio J>).
  *
  * Canonical storage is always the official MiniMax tag string (textarea.value).
  * The visible surface is a contenteditable that renders atomic bd-token chips.
@@ -1268,6 +1268,15 @@ export function mountPromptImageMentions(editor) {
         videos: promptVideosFor(editor, null, editor.timeline?.global?.refVideos || []),
     }));
     wirePromptImageMentions(editor, editor.segPrompt, () => {
+        const seg = editor.timeline?.segments?.[editor.selectedIndex];
+        return {
+            refs: seg?.refs || [],
+            audios: seg?.refAudios || [],
+            videos: promptVideosFor(editor, seg, seg?.refVideos || []),
+        };
+    });
+    // Global-mode per-segment override: same media context as the segment field.
+    wirePromptImageMentions(editor, editor.globalSegPrompt, () => {
         const seg = editor.timeline?.segments?.[editor.selectedIndex];
         return {
             refs: seg?.refs || [],

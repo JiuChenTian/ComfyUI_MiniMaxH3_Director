@@ -285,6 +285,9 @@ const ZH = {
     "placeholder.mixedR2vCommonPrompt": "r2v 公共提示词（只拼在 r2v 组前面）— 输入 @ 选择公共参考",
 
     "placeholder.globalPrompt": "提示词（MiniMax H3 无反向提示词；最多约 7000 字符）— 输入 @ 选择参考图/音频",
+    "panel.segPromptOverride": "片段提示词（覆盖全局）",
+    "placeholder.segPromptOverride": "仅覆盖当前选中片段；留空则使用全局提示词 — 输入 @ 选择参考图/音频",
+    "tooltip.segPromptOverride": "非空时当前片段使用此提示词，留空沿用全局提示词；对所有模式的全局模式生效。",
     "placeholder.segmentPrompt": "该片段提示词（MiniMax H3 无反向提示词）— 输入 @ 选择参考图/音频",
     "placeholder.fl2vShot": "描述这一镜的运动/变化（可选）",
 
@@ -867,6 +870,9 @@ const EN = {
     "placeholder.mixedR2vCommonPrompt": "r2v shared prompt (placed in front of r2v groups only) — type @ for shared refs",
 
     "placeholder.globalPrompt": "Prompt (MiniMax H3 has no negative prompt; ~7000 chars max) — type @ to pick refs",
+    "panel.segPromptOverride": "Segment prompt (overrides global)",
+    "placeholder.segPromptOverride": "Applies to the selected segment only; leave empty to use the global prompt — type @ to pick refs",
+    "tooltip.segPromptOverride": "When non-empty this segment uses this prompt; empty falls back to the global prompt. Works in global mode for every task.",
     "placeholder.segmentPrompt": "Segment prompt (no negative prompt) — type @ to pick refs",
     "placeholder.fl2vShot": "Describe motion/change for this shot (optional)",
 
