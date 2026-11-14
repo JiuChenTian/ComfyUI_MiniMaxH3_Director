@@ -3199,7 +3199,7 @@ class MiniMaxH3DirectorEditor {
                             <span class="bd-label" data-i18n="panel.prompt">提示词</span>
                             <textarea class="bd-prompt" data-r="global-prompt" data-i18n-placeholder="placeholder.globalPrompt" placeholder=""></textarea>
                             <textarea class="bd-prompt bd-prompt-negative hidden" data-r="global-negative" hidden aria-hidden="true"></textarea>
-                            <span class="bd-label" data-r="global-seg-prompt-label" data-i18n="panel.segPromptOverride" hidden>片段提示词（覆盖全局）</span>
+                            <span class="bd-label" data-r="global-seg-prompt-label" data-i18n="panel.segPromptOverride" hidden>片段提示词（覆盖全局）</span><span class="bd-seg-seed" data-r="global-seg-prompt-seed" hidden></span>
                             <textarea class="bd-prompt" data-r="global-seg-prompt" rows="4" data-i18n-placeholder="placeholder.segPromptOverride" hidden></textarea>
                         </div>
                     </div>
@@ -3362,6 +3362,7 @@ class MiniMaxH3DirectorEditor {
         this.segmentPanel = this.root.querySelector('[data-r="segment-panel"]');
         this.globalPrompt = this.root.querySelector('[data-r="global-prompt"]');
         this.globalSegPromptLabel = this.root.querySelector('[data-r="global-seg-prompt-label"]');
+        this.globalSegPromptSeed = this.root.querySelector('[data-r="global-seg-prompt-seed"]');
         this.globalSegPrompt = this.root.querySelector('[data-r="global-seg-prompt"]');
         this.globalNegative = this.root.querySelector('[data-r="global-negative"]');
         this.globalPromptLayout = this.root.querySelector('[data-r="global-prompt-layout"]');
@@ -4522,6 +4523,7 @@ class MiniMaxH3DirectorEditor {
             if (this.isImageBatch()) this.renderImageBatchGroups?.();
             else this.scheduleRender?.();
             this.syncSegmentSeedUI?.();
+            updateFl2vDetailUI?.(this);
         } catch {
             /* Server offline: keep whatever is already displayed. */
         }
@@ -4609,6 +4611,7 @@ class MiniMaxH3DirectorEditor {
         this.renderImageBatchGroups?.();
         this.scheduleRender?.();
         this.syncSegmentSeedUI?.();
+        updateFl2vDetailUI?.(this);
         try {
             api.fetchApi("/minimax/director/seed_records/stamp", {
                 method: "POST",
@@ -6935,21 +6938,25 @@ class MiniMaxH3DirectorEditor {
         wrap.title = t("tooltip.refImageSize");
     }
 
+    /** Chip text for one segment/shot: 「种子 最新 M / 已跑完 N」 or 「种子 —」. */
+    _seedChipText(seg, index) {
+        const pair = this.resolveSeedPair?.(seg, index) || { used: null, completed: null };
+        const bits = [];
+        if (pair.used !== null && pair.used !== undefined) bits.push(`${t("batch.seedLatest")} ${pair.used}`);
+        if (pair.completed !== null && pair.completed !== undefined) bits.push(`${t("batch.seedCompleted")} ${pair.completed}`);
+        return bits.length ? `${t("batch.seedLabel")} ${bits.join(" / ")}` : `${t("batch.seedLabel")} —`;
+    }
+
     /** Read-only seed record chip shown next to the segment ref-image-size. */
     syncSegmentSeedUI() {
         const wrap = this.segLastSeedWrap;
         if (!wrap) return;
         const idx = this.selectedIndex ?? 0;
         const seg = this.timeline.segments?.[idx];
-        const pair = this.resolveSeedPair?.(seg, idx) || { used: null, completed: null };
-        const bits = [];
-        if (pair.used !== null) bits.push(`${t("batch.seedLatest")} ${pair.used}`);
-        if (pair.completed !== null) bits.push(`${t("batch.seedCompleted")} ${pair.completed}`);
-        const show = bits.length > 0;
-        wrap.classList.toggle("hidden", !show);
-        wrap.hidden = !show;
-        if (!show) { wrap.textContent = ""; return; }
-        wrap.textContent = `${t("batch.seedLabel")} ${bits.join(" / ")}`;
+        // Always visible (shows 「种子 —」 before any run) so the record is discoverable.
+        wrap.classList.remove("hidden");
+        wrap.hidden = false;
+        wrap.textContent = this._seedChipText(seg, idx);
         wrap.title = t("tooltip.batchSeedRecord");
     }
 
@@ -6962,12 +6969,20 @@ class MiniMaxH3DirectorEditor {
         const show = this.isGlobalMode() && !this.isFl2vMode() && !this.isGenImage();
         if (this.globalSegPromptLabel) this.globalSegPromptLabel.hidden = !show;
         this.globalSegPrompt.hidden = !show;
+        if (this.globalSegPromptSeed) {
+            this.globalSegPromptSeed.hidden = !show;
+            this.globalSegPromptSeed.classList.toggle("hidden", !show);
+        }
         if (!show) return;
         const idx = this.selectedIndex ?? 0;
         const seg = (this._previewSegments || this.timeline?.segments)?.[idx];
         const value = seg?.prompt || "";
         if (this.globalSegPrompt.value !== value) this.globalSegPrompt.value = value;
         if (this.globalSegPromptLabel) this.globalSegPromptLabel.title = t("tooltip.segPromptOverride");
+        if (this.globalSegPromptSeed) {
+            this.globalSegPromptSeed.textContent = this._seedChipText(seg, idx);
+            this.globalSegPromptSeed.title = t("tooltip.batchSeedRecord");
+        }
     }
 
     /** Apply ResolutionSelector → fixed width/height on timeline + node widgets. */

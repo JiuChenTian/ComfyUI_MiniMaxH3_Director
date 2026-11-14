@@ -809,7 +809,7 @@ export function mountFl2vPanel(parent) {
             <div class="bd-fl2v-shots" data-r="fl2v-shots"></div>
         </div>
         <div class="bd-fl2v-detail hidden" data-r="fl2v-detail">
-            <span class="bd-label" data-i18n="panel.fl2v.shotPrompt">本镜提示词</span>
+            <span class="bd-label" data-i18n="panel.fl2v.shotPrompt">本镜提示词</span><span class="bd-seg-seed" data-r="fl2v-shot-seed"></span>
             <textarea data-r="fl2v-prompt" data-i18n-placeholder="placeholder.fl2vShot" placeholder=""></textarea>
             <textarea data-r="fl2v-negative" class="hidden" hidden aria-hidden="true"></textarea>
         </div>
@@ -824,6 +824,7 @@ export function mountFl2vPanel(parent) {
         workbench: wrap.querySelector('[data-r="fl2v-workbench"]'),
         shotsEl: wrap.querySelector('[data-r="fl2v-shots"]'),
         detail: wrap.querySelector('[data-r="fl2v-detail"]'),
+        shotSeed: wrap.querySelector('[data-r="fl2v-shot-seed"]'),
         prompt: wrap.querySelector('[data-r="fl2v-prompt"]'),
         negative: wrap.querySelector('[data-r="fl2v-negative"]'),
         totalInput: null,
@@ -1384,6 +1385,11 @@ export function updateFl2vDetailUI(editor) {
         if (selectionChanged || ui.negative !== document.activeElement) {
             ui.negative.value = shot.negativePrompt || DEFAULT_FL2V_NEGATIVE;
         }
+    }
+    // Read-only seed ledger chip beside 本镜提示词 (identity by shot recordId).
+    if (ui.shotSeed) {
+        ui.shotSeed.textContent = editor._seedChipText?.(shot, shot.source_index ?? idx) ?? "";
+        ui.shotSeed.title = t("tooltip.batchSeedRecord");
     }
 }
 
