@@ -235,6 +235,11 @@ export async function exportDirectorPack(editor) {
     editor.flushTimelineSync?.();
     const timeline = editor.buildTimelinePayload();
     const widgets = collectPackWidgets(editor);
+    // The node's seed ledger travels with the pack; the server reads it by id.
+    const seedCtx = {
+        node_id: String(editor.node.id),
+        cache_name: editor.widget("cache_name")?.value ?? null,
+    };
     const progress = openPackProgress(editor, "pack.exportProgressTitle");
     let missing = [];
     let downloadName = "MiniMaxH3Director.mmxpack.zip";
@@ -246,6 +251,7 @@ export async function exportDirectorPack(editor) {
             timeline,
             widgets,
             dryRun: true,
+            ...seedCtx,
         });
         if (Number(preview.totalBytes) > LARGE_PACK_BYTES) {
             progress.hide();
@@ -258,7 +264,7 @@ export async function exportDirectorPack(editor) {
         const resp = await api.fetchApi("/minimax/director/export_pack", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ timeline, widgets }),
+            body: JSON.stringify({ timeline, widgets, ...seedCtx }),
         });
         if (!resp.ok) {
             const text = await resp.text();
@@ -343,9 +349,26 @@ export async function importDirectorPack(editor) {
         if (!data?.timeline) throw new Error(t("pack.importFailed"));
         await progress.phase("pack.importApplying");
         editor.applyImportedTimeline(data.timeline, data.widgets || {});
+        // Restore the pack's seed ledger onto this node, then refresh the chips.
+        if (Array.isArray(data.seedRecords) && data.seedRecords.length) {
+            try {
+                await api.fetchApi("/minimax/director/seed_records/write", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        node_id: String(editor.node.id),
+                        cache_name: editor.widget("cache_name")?.value ?? null,
+                        records: data.seedRecords,
+                    }),
+                });
+            } catch {
+                /* seed restore is best-effort; the timeline itself is applied */
+            }
+        }
     } finally {
         progress.close();
     }
+    editor.loadSeedRecords?.();
     const miss = formatMissing(data.missing);
     if (miss) {
         await packAlert(editor, `${t("pack.importDoneMissing")}\n${miss}`, t("toolbar.importPack"));

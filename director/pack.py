@@ -559,7 +559,13 @@ def _task_combo(value: str) -> str:
     return task_type_option_label(spec)
 
 
-def build_export_pack(timeline: dict, widgets: dict | None = None, *, dry_run: bool = False) -> dict[str, Any]:
+def build_export_pack(
+    timeline: dict,
+    widgets: dict | None = None,
+    *,
+    dry_run: bool = False,
+    seed_records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if not isinstance(timeline, dict):
         raise ValueError("timeline must be an object")
     data = copy.deepcopy(timeline)
@@ -648,6 +654,7 @@ def build_export_pack(timeline: dict, widgets: dict | None = None, *, dry_run: b
         "totalBytes": total_bytes,
         "fileCount": len(sizes),
         "taskType": task_key,
+        "seedRecordCount": len(seed_records or []),
     }
     if dry_run:
         return result
@@ -663,6 +670,8 @@ def build_export_pack(timeline: dict, widgets: dict | None = None, *, dry_run: b
             folder.mkdir(parents=True, exist_ok=True)
             _write_json(folder / "group.json", _group_json(card))
         _write_json(staging / "timeline.json", data)
+        if seed_records:
+            _write_json(staging / "seed_records.json", seed_records)
 
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         download_name = f"MiniMaxH3Director-{task_key}-{stamp}.mmxpack.zip"
@@ -1089,11 +1098,25 @@ def import_extracted_pack(extracted: Path) -> dict[str, Any]:
     if isinstance(timeline.get("global"), dict):
         timeline["global"]["taskType"] = task_type
 
+    # Seed ledger travels with the pack (「最新使用 / 已跑完」 per segment).
+    seed_records: list[dict[str, Any]] = []
+    seed_path = extracted / "seed_records.json"
+    if seed_path.is_file():
+        try:
+            parsed = _read_json(seed_path)
+            if isinstance(parsed, list):
+                seed_records = [r for r in parsed if isinstance(r, dict)]
+            elif isinstance(parsed, dict) and isinstance(parsed.get("records"), list):
+                seed_records = [r for r in parsed["records"] if isinstance(r, dict)]
+        except ValueError:
+            seed_records = []
+
     return {
         "timeline": timeline,
         "widgets": widgets,
         "packId": pack_id,
         "missing": unique_missing,
+        "seedRecords": seed_records,
     }
 
 
@@ -1116,11 +1139,28 @@ async def minimax_export_pack(request):
         return web.Response(status=400, text="Missing timeline object.")
     widgets = body.get("widgets") if isinstance(body.get("widgets"), dict) else {}
     dry_run = bool(body.get("dryRun") or body.get("dry_run"))
+
+    # The node's seed ledger travels with the pack; the JS sends the node id
+    # (and cache name) so the server can read the rows before zipping.
+    seed_records: list[dict[str, Any]] = []
+    node_id = str(body.get("node_id") or "").strip()
+    if re.fullmatch(r"\d+", node_id):
+        try:
+            from .segment_cache import read_seed_records, resolve_segment_cache_key
+
+            cache_key = resolve_segment_cache_key(body.get("cache_name"), node_id)
+            if cache_key:
+                seed_records = read_seed_records(cache_key)
+        except Exception as exc:
+            log.debug("Director pack export: seed records read skipped (%s).", exc)
+
     try:
         # build_export_pack is CPU/disk-bound and fully synchronous; running it
         # on the event loop would freeze the entire ComfyUI server for its
         # duration (tens of seconds on big timelines), so do it in a thread.
-        result = await asyncio.to_thread(build_export_pack, timeline, widgets, dry_run=dry_run)
+        result = await asyncio.to_thread(
+            build_export_pack, timeline, widgets, dry_run=dry_run, seed_records=seed_records
+        )
     except Exception as exc:
         log.warning("Director pack export failed: %s", exc)
         return web.Response(status=400, text=str(exc))

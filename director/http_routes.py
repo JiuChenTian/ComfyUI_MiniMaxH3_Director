@@ -617,26 +617,121 @@ async def minimax_clear_segment_cache(request):
 
 
 async def minimax_seed_records(request):
-    """List per-segment last-completed-run seeds for a Director node.
+    """List per-segment seed ledger rows (最新使用 / 已跑完) for a Director node.
 
-    Read-only. ``GET /minimax/director/seed_records?node_id=NN[&cache_name=X]``.
-    Records are written by the executor the moment a segment's video fully
-    completes, and live in the node's segment-cache dir (restart-safe).
+    ``GET /minimax/director/seed_records?node_id=NN[&cache_name=X][&map=JSON]``
+    ``map`` is an optional ``{"<timeline index>": "<recordId>"}`` snapshot of
+    the live timeline; on first call after the upgrade it migrates legacy
+    index-named rows onto the segment's stable identity, after which records
+    follow the segment across deletes/inserts instead of its card position.
     """
     node_id = str(request.query.get("node_id") or "").strip()
     if not re.fullmatch(r"\d+", node_id):
         return web.Response(status=400, text="Invalid Director node id.")
 
-    from .segment_cache import read_seed_records, resolve_segment_cache_key
+    from .segment_cache import (
+        migrate_seed_records,
+        read_seed_records,
+        resolve_segment_cache_key,
+    )
 
     cache_key = resolve_segment_cache_key(request.query.get("cache_name"), node_id)
     if not cache_key:
         return web.Response(status=400, text="Invalid segment cache name.")
 
+    mapping: dict[int, str] = {}
+    raw_map = request.query.get("map")
+    if raw_map:
+        try:
+            parsed = json.loads(raw_map)
+            if isinstance(parsed, dict):
+                for key, rid in parsed.items():
+                    try:
+                        mapping[int(key)] = str(rid)
+                    except (TypeError, ValueError):
+                        continue
+        except ValueError:
+            pass
+
     try:
+        if mapping:
+            migrate_seed_records(cache_key, mapping)
         return web.json_response({"records": read_seed_records(cache_key)})
     except Exception as exc:
         log.warning("MiniMax H3 Director seed records read failed: %s", exc)
+        return web.Response(status=500, text=str(exc))
+
+
+async def minimax_seed_records_forget(request):
+    """Delete seed ledger rows for segments the UI just removed.
+
+    ``POST /minimax/director/seed_records/forget``
+    body ``{node_id, cache_name, recordIds: [...], indices: [...]}``.
+    """
+    try:
+        body = await request.json()
+    except ValueError:
+        return web.Response(status=400, text="Invalid JSON body.")
+    if not isinstance(body, dict):
+        return web.Response(status=400, text="Invalid body shape.")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+
+    from .segment_cache import forget_seed_records, resolve_segment_cache_key
+
+    cache_key = resolve_segment_cache_key(body.get("cache_name"), node_id)
+    if not cache_key:
+        return web.Response(status=400, text="Invalid segment cache name.")
+
+    record_ids = [str(x) for x in (body.get("recordIds") or []) if x]
+    indices: list[int] = []
+    for x in body.get("indices") or []:
+        try:
+            indices.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    try:
+        removed = forget_seed_records(cache_key, record_ids, indices)
+        return web.json_response({"removed": removed})
+    except Exception as exc:
+        log.warning("MiniMax H3 Director seed record forget failed: %s", exc)
+        return web.Response(status=500, text=str(exc))
+
+
+async def minimax_seed_records_write(request):
+    """Restore seed ledger rows imported inside a director pack.
+
+    ``POST /minimax/director/seed_records/write``
+    body ``{node_id, cache_name, records: [{recordId, usedSeed, usedTs,
+    completedSeed, completedTs}, ...]}``.
+    """
+    try:
+        body = await request.json()
+    except ValueError:
+        return web.Response(status=400, text="Invalid JSON body.")
+    if not isinstance(body, dict):
+        return web.Response(status=400, text="Invalid body shape.")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+
+    from .segment_cache import put_seed_records, resolve_segment_cache_key
+
+    cache_key = resolve_segment_cache_key(body.get("cache_name"), node_id)
+    if not cache_key:
+        return web.Response(status=400, text="Invalid segment cache name.")
+
+    records = body.get("records")
+    if not isinstance(records, list):
+        return web.Response(status=400, text="records must be a list.")
+    try:
+        written = put_seed_records(cache_key, records)
+        return web.json_response({"written": written})
+    except Exception as exc:
+        log.warning("MiniMax H3 Director seed record restore failed: %s", exc)
         return web.Response(status=500, text=str(exc))
 
 
@@ -697,6 +792,18 @@ def register_routes() -> bool:
         "GET",
         "/minimax/director/seed_records",
         minimax_seed_records,
+    )
+    _register_route(
+        routes,
+        "POST",
+        "/minimax/director/seed_records/forget",
+        minimax_seed_records_forget,
+    )
+    _register_route(
+        routes,
+        "POST",
+        "/minimax/director/seed_records/write",
+        minimax_seed_records_write,
     )
     from .pack import minimax_download_pack, minimax_export_pack, minimax_import_pack
 

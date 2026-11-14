@@ -2725,8 +2725,11 @@ function appendBatchCard(list, editor, seg, index, ctx) {
         seedLabel.setAttribute("data-i18n", "batch.seedLabel");
         seedLabel.textContent = t("batch.seedLabel");
         const seedVal = document.createElement("b");
-        const seedNum = editor.resolveSegmentSeed?.(seg, index) ?? Number(seg.lastSeed);
-        seedVal.textContent = Number.isFinite(seedNum) ? String(Math.trunc(seedNum)) : "—";
+        const pair = editor.resolveSeedPair?.(seg, index) || { used: null, completed: null };
+        const seedBits = [];
+        if (pair.used !== null && pair.used !== undefined) seedBits.push(`${t("batch.seedLatest")} ${pair.used}`);
+        if (pair.completed !== null && pair.completed !== undefined) seedBits.push(`${t("batch.seedCompleted")} ${pair.completed}`);
+        seedVal.textContent = seedBits.length ? seedBits.join(" / ") : "—";
         seedWrap.appendChild(seedLabel);
         seedWrap.appendChild(seedVal);
         meta.appendChild(seedWrap);

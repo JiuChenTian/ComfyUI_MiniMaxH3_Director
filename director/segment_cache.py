@@ -1799,19 +1799,67 @@ def inspect_first_pass_cache(
 
 SEED_RECORD_SUFFIX = ".seed.json"
 _SEED_RECORD_NAME_RE = re.compile(r"^seg_(\d+)\.seed\.json$")
+_SEED_RECORD_ID_NAME_RE = re.compile(r"^rec_([A-Za-z0-9_-]{1,64})\.seed\.json$")
+_SEED_RECORD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
-def write_segment_seed_record(node_id: str | None, seg_index: int, seed: int) -> None:
-    """Record the seed of the last run that FULLY completed this segment.
+def _seed_record_path(root: Path, record_id: str | None, seg_index: int | None) -> Path | None:
+    """Ledger file for one segment: identity-keyed when possible."""
+    if record_id and _SEED_RECORD_ID_RE.match(record_id):
+        return root / f"rec_{record_id}{SEED_RECORD_SUFFIX}"
+    if seg_index is not None:
+        try:
+            return root / f"seg_{int(seg_index):04d}{SEED_RECORD_SUFFIX}"
+        except (TypeError, ValueError):
+            return None
+    return None
 
-    Written exactly once per segment, at the moment its final A/V chunk is
-    accepted — so a run that dies (or gets interrupted) mid-segment leaves
-    the previous record untouched. Lives in the node's segment-cache dir and
-    survives restarts; ``prune_segment_cache`` drops it with the group, but
-    「清空缓存」 deliberately keeps it (the ledger outlives the latents).
-    Never raises.
+
+def _seed_record_load(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    match = _SEED_RECORD_ID_NAME_RE.match(path.name)
+    if match:
+        data.setdefault("recordId", match.group(1))
+    else:
+        idx = _SEED_RECORD_NAME_RE.match(path.name)
+        if idx:
+            data.setdefault("index", int(idx.group(1)))
+    # Legacy single-seed rows mean 已跑完 (they were only written on completion).
+    if "seed" in data and "completedSeed" not in data:
+        try:
+            data["completedSeed"] = int(data.pop("seed"))
+        except (TypeError, ValueError):
+            pass
+    if "ts" in data and "completedTs" not in data:
+        data["completedTs"] = data.pop("ts")
+    return data
+
+
+def update_segment_seed_record(
+    node_id: str | None,
+    record_id: str | None,
+    seg_index: int | None,
+    seed: int,
+    *,
+    phase: str,
+) -> None:
+    """Stamp one phase of the seed ledger for one segment.
+
+    ``phase``:
+      - ``used``: the run just started this segment (records 最新使用 seed;
+        survives an interrupt — this is the seed the LAST attempt used).
+      - ``completed``: the segment's final A/V chunk was accepted (已跑完 seed).
+
+    Identity-keyed (``rec_<recordId>.seed.json``) when the timeline carries a
+    recordId for the segment, else the legacy index name. Read-modify-write so
+    both phases live in one row. Never raises.
     """
-    if not node_id:
+    if not node_id or phase not in {"used", "completed"}:
         return
     try:
         import time
@@ -1819,19 +1867,34 @@ def write_segment_seed_record(node_id: str | None, seg_index: int, seed: int) ->
         root = _cache_dir_or_none(node_id)
         if root is None:
             return
+        path = _seed_record_path(root, record_id, seg_index)
+        if path is None:
+            return
         root.mkdir(parents=True, exist_ok=True)
-        path = root / f"seg_{int(seg_index):04d}{SEED_RECORD_SUFFIX}"
-        payload = {"seed": int(seed), "ts": int(time.time())}
+        row = _seed_record_load(path) or {}
+        stamp = int(time.time())
+        try:
+            seed_val = int(seed)
+        except (TypeError, ValueError):
+            return
+        if phase == "used":
+            row["usedSeed"] = seed_val
+            row["usedTs"] = stamp
+        else:
+            row["completedSeed"] = seed_val
+            row["completedTs"] = stamp
+        row.pop("seed", None)
+        row.pop("ts", None)
         _write_via_temp(
             path,
-            lambda p: p.write_text(json.dumps(payload), encoding="utf-8"),
+            lambda p: p.write_text(json.dumps(row), encoding="utf-8"),
         )
     except Exception as exc:
         log.debug("Segment seed record write skipped (%s).", exc)
 
 
 def read_seed_records(node_id_or_key: str | None) -> list[dict[str, Any]]:
-    """All ``seg_XXXX.seed.json`` rows for one Director node, sorted by index."""
+    """All seed ledger rows for one Director node (identity + legacy rows)."""
     records: list[dict[str, Any]] = []
     if not node_id_or_key:
         return records
@@ -1839,23 +1902,137 @@ def read_seed_records(node_id_or_key: str | None) -> list[dict[str, Any]]:
         root = _cache_dir_or_none(node_id_or_key)
         if root is None or not root.is_dir():
             return records
-        for path in root.glob(f"seg_*{SEED_RECORD_SUFFIX}"):
-            match = _SEED_RECORD_NAME_RE.match(path.name)
-            if not match:
-                continue
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                records.append({
-                    "index": int(match.group(1)),
-                    "seed": int(data.get("seed")),
-                    "ts": data.get("ts"),
-                })
-            except (ValueError, TypeError, OSError):
-                continue
+        for path in root.glob(f"*{SEED_RECORD_SUFFIX}"):
+            row = _seed_record_load(path)
+            if row is not None:
+                records.append(row)
     except Exception as exc:
         log.debug("Segment seed records read skipped (%s).", exc)
-    records.sort(key=lambda row: row["index"])
+    records.sort(key=lambda row: (row.get("recordId") or "", row.get("index") if row.get("index") is not None else 1 << 30))
     return records
+
+
+def migrate_seed_records(node_id: str | None, mapping: dict[int, str]) -> int:
+    """Rename legacy index-named rows to identity rows per ``{index: recordId}``.
+
+    Called by the frontend's GET with the current timeline mapping, so ledgers
+    written before recordIds existed follow the right segment after the
+    upgrade. Returns the number of migrated files. Never raises.
+    """
+    if not node_id or not mapping:
+        return 0
+    moved = 0
+    try:
+        root = _cache_dir_or_none(node_id)
+        if root is None or not root.is_dir():
+            return 0
+        for index, record_id in mapping.items():
+            if not record_id or not _SEED_RECORD_ID_RE.match(str(record_id)):
+                continue
+            legacy = root / f"seg_{int(index):04d}{SEED_RECORD_SUFFIX}"
+            if not legacy.is_file():
+                continue
+            row = _seed_record_load(legacy)
+            target = root / f"rec_{record_id}{SEED_RECORD_SUFFIX}"
+            if target.is_file():
+                merged = _seed_record_load(target) or {}
+                for k, v in (row or {}).items():
+                    merged.setdefault(k, v)
+                row = merged
+            if row is None:
+                continue
+            row["recordId"] = str(record_id)
+            row.pop("index", None)
+            try:
+                _write_via_temp(
+                    target,
+                    lambda p, r=row: p.write_text(json.dumps(r), encoding="utf-8"),
+                )
+                _safe_unlink(legacy)
+                moved += 1
+            except Exception:
+                continue
+    except Exception as exc:
+        log.debug("Segment seed record migration skipped (%s).", exc)
+    return moved
+
+
+def forget_seed_records(
+    node_id: str | None,
+    record_ids: list[str] | None = None,
+    indices: list[int] | None = None,
+) -> int:
+    """Delete ledger rows for deleted segments (UI 「删除」 path). Never raises."""
+    if not node_id:
+        return 0
+    removed = 0
+    try:
+        root = _cache_dir_or_none(node_id)
+        if root is None or not root.is_dir():
+            return removed
+        for record_id in record_ids or []:
+            if not record_id or not _SEED_RECORD_ID_RE.match(str(record_id)):
+                continue
+            path = root / f"rec_{record_id}{SEED_RECORD_SUFFIX}"
+            if path.is_file() and _safe_unlink(path):
+                removed += 1
+        for index in indices or []:
+            try:
+                path = root / f"seg_{int(index):04d}{SEED_RECORD_SUFFIX}"
+            except (TypeError, ValueError):
+                continue
+            if path.is_file() and _safe_unlink(path):
+                removed += 1
+    except Exception as exc:
+        log.debug("Segment seed record forget skipped (%s).", exc)
+    return removed
+
+
+def put_seed_records(node_id: str | None, records: list[dict[str, Any]]) -> int:
+    """Restore ledger rows imported with a director pack. Never raises."""
+    if not node_id:
+        return 0
+    written = 0
+    try:
+        root = _cache_dir_or_none(node_id)
+        if root is None:
+            return 0
+        root.mkdir(parents=True, exist_ok=True)
+        for row in records or []:
+            if not isinstance(row, dict):
+                continue
+            clean: dict[str, Any] = {}
+            rid = str(row.get("recordId") or "").strip()
+            if rid and _SEED_RECORD_ID_RE.match(rid):
+                clean["recordId"] = rid
+            for key in ("usedSeed", "usedTs", "completedSeed", "completedTs"):
+                val = row.get(key)
+                if val is None:
+                    continue
+                try:
+                    clean[key] = int(val)
+                except (TypeError, ValueError):
+                    continue
+            if not clean:
+                continue
+            path = _seed_record_path(
+                root,
+                clean.get("recordId"),
+                row.get("index") if row.get("index") is not None else None,
+            )
+            if path is None:
+                continue
+            try:
+                _write_via_temp(
+                    path,
+                    lambda p, r=clean: p.write_text(json.dumps(r), encoding="utf-8"),
+                )
+                written += 1
+            except Exception:
+                continue
+    except Exception as exc:
+        log.debug("Segment seed record restore skipped (%s).", exc)
+    return written
 
 
 def clear_segment_cache(node_id: str | None, kind: str = "final") -> int:

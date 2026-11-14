@@ -4441,29 +4441,70 @@ class MiniMaxH3DirectorEditor {
     }
 
     /**
-     * Seed ledger: the executor writes seg_XXXX.seed.json on the server the
-     * moment a segment's video FULLY completes (interrupted/failed segments
-     * keep their previous record). Records live in the node's segment-cache
-     * dir, so they survive restarts without the workflow being saved.
+     * Give every timeline segment / fl2v shot a stable identity (recordId).
+     * Seed ledger rows follow recordId instead of card position, so deleting
+     * or inserting segments never shifts records onto the wrong segment.
+     */
+    ensureRecordIds() {
+        const timeline = this.timeline;
+        if (!timeline) return false;
+        let changed = false;
+        for (const bucket of [timeline.segments, timeline.shots]) {
+            if (!Array.isArray(bucket)) continue;
+            for (const seg of bucket) {
+                if (seg && typeof seg === "object" && !seg.recordId) {
+                    seg.recordId = this.generateRecordId();
+                    changed = true;
+                }
+            }
+        }
+        if (changed) this.commit(false, { syncTimeline: true });
+        return changed;
+    }
+
+    generateRecordId() {
+        return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+    }
+
+    /**
+     * Seed ledger (server-side, survives restarts without saving the workflow):
+     *   最新使用 — seed of the most recent attempt at this segment, whether or
+     *              not it finished (stamped by the executor when the attempt
+     *              starts);
+     *   已跑完   — seed of the most recent run that fully completed the segment.
+     * Rows are keyed by the segment's recordId; legacy index-keyed rows on the
+     * server are migrated onto identities on the first request.
      */
     async loadSeedRecords() {
         const node = this.node;
         try {
+            this.ensureRecordIds();
             const params = new URLSearchParams({ node_id: String(node.id) });
             const cacheName = this.widget("cache_name")?.value;
             if (cacheName) params.set("cache_name", String(cacheName));
+            const map = {};
+            (this.timeline.segments || []).forEach((seg, i) => {
+                if (seg?.recordId) map[i] = seg.recordId;
+            });
+            if (Object.keys(map).length) params.set("map", JSON.stringify(map));
             const resp = await api.fetchApi(`/minimax/director/seed_records?${params}`);
             if (!resp.ok) return;
             const data = await resp.json();
-            const map = {};
+            const byId = {};
+            const byIndex = {};
             for (const row of data?.records || []) {
+                const rid = typeof row?.recordId === "string" ? row.recordId : "";
                 const idx = Number(row?.index);
-                const seed = Number(row?.seed);
-                if (Number.isFinite(idx) && Number.isFinite(seed)) {
-                    map[idx] = Math.trunc(seed);
-                }
+                const pair = {
+                    used: Number.isFinite(Number(row?.usedSeed)) ? Math.trunc(Number(row.usedSeed)) : null,
+                    completed: Number.isFinite(Number(row?.completedSeed)) ? Math.trunc(Number(row.completedSeed)) : null,
+                };
+                if (pair.used === null && pair.completed === null) continue;
+                if (rid) byId[rid] = pair;
+                else if (Number.isFinite(idx)) byIndex[idx] = pair;
             }
-            this._seedRecords = map;
+            this._seedRecordsById = byId;
+            this._seedRecordsByIndex = byIndex;
             if (this.isImageBatch()) this.renderImageBatchGroups?.();
             else this.scheduleRender?.();
             this.syncSegmentSeedUI?.();
@@ -4472,12 +4513,51 @@ class MiniMaxH3DirectorEditor {
         }
     }
 
-    /** Seed to display for one segment: server ledger first, then legacy in-timeline record. */
-    resolveSegmentSeed(seg, index) {
-        const rec = this._seedRecords?.[Number(index)];
-        if (Number.isFinite(Number(rec))) return Math.trunc(Number(rec));
+    /** Ledger rows for one segment: { used, completed } (null = never recorded). */
+    resolveSeedPair(seg, index) {
+        // Identity rows win; index rows are only consulted for segments that
+        // still have no recordId (legacy), so a shift can never mis-target.
+        const row = (seg?.recordId && this._seedRecordsById?.[seg.recordId])
+            || (!seg?.recordId && this._seedRecordsByIndex?.[Number(index)])
+            || null;
         const legacy = Number(seg?.lastSeed);
-        return Number.isFinite(legacy) ? Math.trunc(legacy) : null;
+        const legacySeed = Number.isFinite(legacy) ? Math.trunc(legacy) : null;
+        return {
+            used: row?.used ?? null,
+            completed: row?.completed ?? legacySeed,
+        };
+    }
+
+    /** Drop ledger rows for deleted segments (server + local cache). */
+    forgetSeedRecords(entries) {
+        const ids = [];
+        const indices = [];
+        for (const entry of entries || []) {
+            const seg = entry?.seg;
+            if (seg && typeof seg === "object") {
+                if (seg.recordId) {
+                    delete this._seedRecordsById?.[seg.recordId];
+                    ids.push(seg.recordId);
+                }
+                delete seg.lastSeed;
+            }
+            if (Number.isFinite(Number(entry?.index))) indices.push(Number(entry.index));
+        }
+        if (!ids.length && !indices.length) return;
+        try {
+            api.fetchApi("/minimax/director/seed_records/forget", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    node_id: String(this.node.id),
+                    cache_name: this.widget("cache_name")?.value ?? null,
+                    recordIds: ids,
+                    indices,
+                }),
+            }).catch(() => { /* best effort */ });
+        } catch {
+            /* best effort */
+        }
     }
 
     getDirectorMode() {
@@ -6797,12 +6877,15 @@ class MiniMaxH3DirectorEditor {
         if (!wrap) return;
         const idx = this.selectedIndex ?? 0;
         const seg = this.timeline.segments?.[idx];
-        const seed = this.resolveSegmentSeed?.(seg, idx) ?? Number(seg?.lastSeed);
-        const show = Number.isFinite(seed);
+        const pair = this.resolveSeedPair?.(seg, idx) || { used: null, completed: null };
+        const bits = [];
+        if (pair.used !== null) bits.push(`${t("batch.seedLatest")} ${pair.used}`);
+        if (pair.completed !== null) bits.push(`${t("batch.seedCompleted")} ${pair.completed}`);
+        const show = bits.length > 0;
         wrap.classList.toggle("hidden", !show);
         wrap.hidden = !show;
         if (!show) { wrap.textContent = ""; return; }
-        wrap.textContent = `${t("batch.seedLabel")} ${Math.trunc(seed)}`;
+        wrap.textContent = `${t("batch.seedLabel")} ${bits.join(" / ")}`;
         wrap.title = t("tooltip.batchSeedRecord");
     }
 
@@ -10309,6 +10392,16 @@ class MiniMaxH3DirectorEditor {
     }
 
     deleteSelectedSegment() {
+        // Drop this segment's seed ledger rows (server + local) with it;
+        // identity rows are keyed by recordId so position shifts never
+        // mis-target another segment's records.
+        {
+            const goneIndex = this.selectedIndex;
+            const goneSeg = this.isFl2vMode()
+                ? ((this.timeline.shots || [])[goneIndex] || (this.timeline.segments || [])[goneIndex])
+                : (this.timeline.segments || [])[goneIndex];
+            if (goneSeg) this.forgetSeedRecords([{ seg: goneSeg, index: goneIndex }]);
+        }
         if (this.isGenMode()) {
             this.genDeleteSelectedSegment();
             return;

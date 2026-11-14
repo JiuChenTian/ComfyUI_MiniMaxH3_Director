@@ -83,7 +83,7 @@ from .segment_cache import (
     resolve_segment_cache_key,
     save_first_pass_cache,
     save_segment_cache,
-    write_segment_seed_record,
+    update_segment_seed_record,
 )
 from .segment_mp4_export import (
     copy_segment_mp4_suffix,
@@ -1602,10 +1602,14 @@ def execute_director_plan_core(
         completed_refine_passes[seg.index] = pass_clips
         segment_export_lengths[seg.index] = int(chunk.shape[0])
         # Ledger: this segment's video fully finished in this run — record the
-        # seed now, per segment, so an interrupted later segment (or a crash)
-        # never rewrites the "last completed seed" of finished ones.
-        write_segment_seed_record(
-            node_id, seg.index, int(getattr(plan, "sample_seed", 0) or 0)
+        # 「已跑完」 seed now, per segment, so an interrupted later segment (or a
+        # crash) never rewrites the completed record of finished ones.
+        update_segment_seed_record(
+            node_id,
+            getattr(seg, "record_id", "") or "",
+            seg.timeline_index,
+            int(getattr(plan, "sample_seed", 0) or 0),
+            phase="completed",
         )
 
         #「分段导出」: flush mp4 as soon as this segment succeeds (crash-safe).
@@ -1696,6 +1700,15 @@ def execute_director_plan_core(
                         segment_pre_face=segment_pre_face,
                     )
         if seg.index in run_indices:
+            # Ledger 「最新使用」: stamp the seed the moment this segment's
+            # attempt starts — whether or not it finishes.
+            update_segment_seed_record(
+                node_id,
+                getattr(seg, "record_id", "") or "",
+                seg.timeline_index,
+                int(getattr(plan, "sample_seed", 0) or 0),
+                phase="used",
+            )
             if clear_vram_between_segments and segment_outputs:
                 cleanup_segment_vram(enabled=True)
             try:

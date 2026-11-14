@@ -248,6 +248,10 @@ class SegmentPlan:
     ref_image_size: str = "match"
     # Per-segment LoRA stack: [{name, strength, active}]. Empty = the node's model.
     loras: list = field(default_factory=list)
+    # Stable per-segment identity minted by the Director UI (persisted in the
+    # timeline). Keys the 「最新使用 / 已跑完」 seed ledger so records follow a
+    # segment across deletes/inserts instead of shifting with card positions.
+    record_id: str = ""
 
     @property
     def frame_count(self) -> int:
@@ -925,6 +929,7 @@ def build_director_plan(
                 reference_video_meta=seg_ref_video,
                 reference_video_start_frame=ref_start,
                 loras=seg_loras,
+                record_id=str(seg_data.get("recordId") or ""),
             )
         )
 
