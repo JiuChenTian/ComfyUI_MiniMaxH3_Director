@@ -1885,6 +1885,14 @@ def update_segment_seed_record(
             row["completedTs"] = stamp
         row.pop("seed", None)
         row.pop("ts", None)
+        # Identity/legacy rows also carry their current index so orphan rows
+        # (fresh recordIds after an unsaved refresh) can be re-attached by
+        # migrate_seed_records on the next page load.
+        if seg_index is not None:
+            try:
+                row["index"] = int(seg_index)
+            except (TypeError, ValueError):
+                pass
         _write_via_temp(
             path,
             lambda p: p.write_text(json.dumps(row), encoding="utf-8"),
@@ -1949,6 +1957,50 @@ def migrate_seed_records(node_id: str | None, mapping: dict[int, str]) -> int:
                     lambda p, r=row: p.write_text(json.dumps(r), encoding="utf-8"),
                 )
                 _safe_unlink(legacy)
+                moved += 1
+            except Exception:
+                continue
+        # Re-key orphan identity rows: if the workflow was never re-saved after
+        # recordIds were first generated, a refresh mints fresh ids and the old
+        # rows would never match. Rows still carry their segment index, so when
+        # their id is absent from the current mapping we can re-attach them to
+        # the segment currently sitting at that index.
+        current_ids = {str(v) for v in mapping.values() if v}
+        by_index = {}
+        for index, record_id in mapping.items():
+            if record_id and _SEED_RECORD_ID_RE.match(str(record_id)):
+                by_index[int(index)] = str(record_id)
+        for path in root.glob(f"rec_*{SEED_RECORD_SUFFIX}"):
+            match = _SEED_RECORD_ID_NAME_RE.match(path.name)
+            if not match:
+                continue
+            row = _seed_record_load(path)
+            if not row:
+                continue
+            old_id = str(match.group(1))
+            if old_id in current_ids:
+                continue
+            idx = row.get("index")
+            try:
+                idx = int(idx)
+            except (TypeError, ValueError):
+                continue
+            new_id = by_index.get(idx)
+            if not new_id or new_id == old_id:
+                continue
+            target = root / f"rec_{new_id}{SEED_RECORD_SUFFIX}"
+            if target.is_file():
+                merged = _seed_record_load(target) or {}
+                for k, v in row.items():
+                    merged.setdefault(k, v)
+                row = merged
+            row["recordId"] = new_id
+            try:
+                _write_via_temp(
+                    target,
+                    lambda p, r=row: p.write_text(json.dumps(r), encoding="utf-8"),
+                )
+                _safe_unlink(path)
                 moved += 1
             except Exception:
                 continue

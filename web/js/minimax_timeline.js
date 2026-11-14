@@ -3199,7 +3199,7 @@ class MiniMaxH3DirectorEditor {
                             <span class="bd-label" data-i18n="panel.prompt">提示词</span>
                             <textarea class="bd-prompt" data-r="global-prompt" data-i18n-placeholder="placeholder.globalPrompt" placeholder=""></textarea>
                             <textarea class="bd-prompt bd-prompt-negative hidden" data-r="global-negative" hidden aria-hidden="true"></textarea>
-                            <span class="bd-label" data-r="global-seg-prompt-label" data-i18n="panel.segPromptOverride" hidden>片段提示词（覆盖全局）</span><span class="bd-seg-seed" data-r="global-seg-prompt-seed" hidden></span>
+                            <span class="bd-label" data-r="global-seg-prompt-label" data-i18n="panel.segPromptOverride" hidden>片段提示词（覆盖全局）</span><span class="bd-seg-seed" data-r="global-seg-prompt-seed"></span>
                             <textarea class="bd-prompt" data-r="global-seg-prompt" rows="4" data-i18n-placeholder="placeholder.segPromptOverride" hidden></textarea>
                         </div>
                     </div>
@@ -4464,14 +4464,33 @@ class MiniMaxH3DirectorEditor {
         const timeline = this.timeline;
         if (!timeline) return false;
         let changed = false;
+        const cacheName = String(this.widget("cache_name")?.value ?? "");
         for (const bucket of [timeline.segments, timeline.shots]) {
             if (!Array.isArray(bucket)) continue;
-            for (const seg of bucket) {
+            if (!bucket.some((s) => s && typeof s === "object" && !s.recordId)) continue;
+            // If the workflow was never saved, a refresh mints fresh recordIds
+            // and the server-side seed rows stop matching. Reuse the previously
+            // minted ids from localStorage whenever the timeline boundaries are
+            // identical, so the identity survives unsaved refreshes.
+            const kind = bucket === timeline.segments ? "seg" : "shot";
+            const storeKey = `minimaxH3_ids_${this.node.id}_${cacheName}_${kind}`;
+            const sig = JSON.stringify(bucket.map((s) => [
+                s?.startFrame ?? s?.start ?? null,
+                s?.endFrame ?? s?.end ?? null,
+            ]));
+            let saved = null;
+            try { saved = JSON.parse(localStorage.getItem(storeKey) || "null"); } catch { saved = null; }
+            const reuse = saved && saved.sig === sig && Array.isArray(saved.ids) ? saved.ids : null;
+            bucket.forEach((seg, i) => {
                 if (seg && typeof seg === "object" && !seg.recordId) {
-                    seg.recordId = this.generateRecordId();
+                    const old = reuse ? String(reuse[i] ?? "") : "";
+                    seg.recordId = /^[A-Za-z0-9_-]{1,64}$/.test(old) ? old : this.generateRecordId();
                     changed = true;
                 }
-            }
+            });
+            try {
+                localStorage.setItem(storeKey, JSON.stringify({ sig, ids: bucket.map((s) => s?.recordId || null) }));
+            } catch { /* storage may be unavailable; id reuse stays best-effort */ }
         }
         if (changed) this.commit(false, { syncTimeline: true });
         return changed;
@@ -6970,8 +6989,14 @@ class MiniMaxH3DirectorEditor {
         if (this.globalSegPromptLabel) this.globalSegPromptLabel.hidden = !show;
         this.globalSegPrompt.hidden = !show;
         if (this.globalSegPromptSeed) {
-            this.globalSegPromptSeed.hidden = !show;
-            this.globalSegPromptSeed.classList.toggle("hidden", !show);
+            // Always visible (user request): the chip shows the selected
+            // segment's seed record even when the override field is hidden.
+            this.globalSegPromptSeed.hidden = false;
+            this.globalSegPromptSeed.classList.remove("hidden");
+            const seedIdx = this.selectedIndex ?? 0;
+            const seedSeg = (this._previewSegments || this.timeline?.segments)?.[seedIdx] || null;
+            this.globalSegPromptSeed.textContent = this._seedChipText(seedSeg, seedIdx);
+            this.globalSegPromptSeed.title = t("tooltip.batchSeedRecord");
         }
         if (!show) return;
         const idx = this.selectedIndex ?? 0;
@@ -6979,10 +7004,6 @@ class MiniMaxH3DirectorEditor {
         const value = seg?.prompt || "";
         if (this.globalSegPrompt.value !== value) this.globalSegPrompt.value = value;
         if (this.globalSegPromptLabel) this.globalSegPromptLabel.title = t("tooltip.segPromptOverride");
-        if (this.globalSegPromptSeed) {
-            this.globalSegPromptSeed.textContent = this._seedChipText(seg, idx);
-            this.globalSegPromptSeed.title = t("tooltip.batchSeedRecord");
-        }
     }
 
     /** Apply ResolutionSelector → fixed width/height on timeline + node widgets. */
