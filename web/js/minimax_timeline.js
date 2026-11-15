@@ -4335,6 +4335,36 @@ class MiniMaxH3DirectorEditor {
         )].sort((a, b) => a - b);
     }
 
+    /** v7: the 「选择运行」 checkbox belongs to the segment, not the slot.
+     *  runSelection stays an index array (wire-compat), but every mutation of
+     *  the segment list must remap it so a moved segment carries its check
+     *  with it, and the slot freed by a delete never hands the check to the
+     *  next segment (same anti-placeholder rule as the seed ledger). */
+    remapRunSelectionForDelete(index) {
+        if (!this.isRunSelectEnabled()) return;
+        const sel = Array.isArray(this.timeline.runSelection) ? this.timeline.runSelection : [];
+        if (!sel.length) return;
+        this.timeline.runSelection = [...new Set(sel
+            .filter((i) => i !== index)
+            .map((i) => (i > index ? i - 1 : i)),
+        )].sort((a, b) => a - b);
+    }
+
+    /** Splice-move index remap: rank fromRank lands on insertRank; the ranks
+     *  the segment jumped over shift one slot the other way. */
+    remapRunSelectionForMove(fromRank, insertRank) {
+        if (!this.isRunSelectEnabled()) return;
+        const sel = Array.isArray(this.timeline.runSelection) ? this.timeline.runSelection : [];
+        if (!sel.length || fromRank === insertRank) return;
+        const mapped = sel.map((i) => {
+            if (i === fromRank) return insertRank;
+            if (fromRank < insertRank && i > fromRank && i <= insertRank) return i - 1;
+            if (fromRank > insertRank && i >= insertRank && i < fromRank) return i + 1;
+            return i;
+        });
+        this.timeline.runSelection = [...new Set(mapped)].sort((a, b) => a - b);
+    }
+
     isSegmentRunEnabled(index) {
         if (!this.isRunSelectEnabled()) return true;
         return (this.timeline.runSelection || []).includes(index);
@@ -5826,7 +5856,9 @@ class MiniMaxH3DirectorEditor {
 
     genDeleteSelectedSegment() {
         if (this.timeline.segments.length <= 1) return;
-        this.timeline.segments.splice(this.selectedIndex, 1);
+        const goneIdx = this.selectedIndex;
+        this.timeline.segments.splice(goneIdx, 1);
+        this.remapRunSelectionForDelete(goneIdx);
         this.selectedIndex = clamp(this.selectedIndex, 0, this.timeline.segments.length - 1);
         this.commit();
     }
@@ -6085,6 +6117,7 @@ class MiniMaxH3DirectorEditor {
             const insertRank = toRank;
             shots.splice(insertRank, 0, moved);
             this.timeline.shots = shots;
+            this.remapRunSelectionForMove(fromRank, insertRank);
             syncFl2vFromShots(this);
             this.selectedIndex = insertRank;
             updateFl2vDetailUI(this);
@@ -6103,6 +6136,7 @@ class MiniMaxH3DirectorEditor {
             const insertRank = toRank;
             metas.splice(insertRank, 0, mMeta);
             this.timeline.segments = metas;
+            this.remapRunSelectionForMove(fromRank, insertRank);
             normalizeImageBatchSegments(this);
             this.selectedIndex = insertRank;
             this.updateVideoNameLabel();
@@ -6128,6 +6162,7 @@ class MiniMaxH3DirectorEditor {
                 metas[i].frameCount = slot.length;
             }
             this.timeline.segments = metas;
+            this.remapRunSelectionForMove(fromRank, insertRank);
             this.normalizeGenSegments();
             this.selectedIndex = insertRank;
             this.updateVideoNameLabel();
@@ -6160,6 +6195,7 @@ class MiniMaxH3DirectorEditor {
 
         this.setFrameMap(newMap);
         this.timeline.segments = newSegs;
+        this.remapRunSelectionForMove(fromRank, insertRank);
         this._syncPrimaryVideoFromClips(newMap);
         this.selectedIndex = insertRank;
         this._prefetchSegmentThumbs(0, Math.min(newMap.length, THUMB_PREFETCH_BATCH * 4));
@@ -10598,6 +10634,7 @@ class MiniMaxH3DirectorEditor {
         // Remove segment UI entry first, then cut matching frames from the
         // logical timeline so preview / export no longer include that range.
         this.timeline.segments.splice(idx, 1);
+        this.remapRunSelectionForDelete(idx);
 
         let total = this.getTotalFrames();
         let map = [];

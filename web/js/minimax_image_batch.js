@@ -1024,6 +1024,8 @@ export function deleteImageBatchGroup(editor, index) {
     flushBatchPromptInputs(editor);
     flushBatchDurationInputs(editor);
     editor.timeline.segments.splice(index, 1);
+    // v7: free slot must not inherit the deleted group's run-select check.
+    editor.remapRunSelectionForDelete?.(index);
     normalizeImageBatchSegments(editor);
     editor.selectedIndex = clamp(
         editor.selectedIndex > index ? editor.selectedIndex - 1 : editor.selectedIndex,

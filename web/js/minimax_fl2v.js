@@ -725,6 +725,8 @@ export function removeFl2vShot(editor, index) {
     const idx = clamp(parseInt(index, 10) || 0, 0, Math.max(0, shots.length - 1));
     if (!shots[idx]) return;
     shots.splice(idx, 1);
+    // v7: free slot must not inherit the deleted shot's run-select check.
+    editor.remapRunSelectionForDelete?.(idx);
     syncFl2vFromShots(editor);
     editor.selectedIndex = clamp(idx, 0, Math.max(0, shots.length - 1));
     if (!shots.length) editor.selectedIndex = 0;
