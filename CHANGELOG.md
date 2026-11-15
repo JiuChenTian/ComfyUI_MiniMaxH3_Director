@@ -1,6 +1,6 @@
 # 更新修复日志（CHANGELOG）
 
-> 分支 `director-optimizations-v7`：导演台（MiniMax H3 Director）导出稳定性与随机种子台账系列优化，共 9 个提交。
+> 本 fork 的 **main 分支 = 个人更改项目**：导演台（MiniMax H3 Director）导出稳定性与随机种子台账系列优化（共 9 个提交，含本日志）。
 > 本分支改动**不推上游 PR**（上游 PR 状态见「项目来源」）。
 
 ## 项目来源
