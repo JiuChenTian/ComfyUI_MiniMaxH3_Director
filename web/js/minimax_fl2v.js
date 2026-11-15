@@ -1617,6 +1617,8 @@ export function buildFl2vPayloadFields(editor) {
     const total = getFl2vSampleFrames(editor);
     const shots = (editor.timeline.shots || []).map((s, i) => ({
         id: s.id,
+        // Seed ledger travels by shot identity (镜头台账 v3+).
+        recordId: s.recordId || "",
         durationSec: s.durationSec,
         prompt: s.prompt || "",
         negativePrompt: s.negativePrompt || DEFAULT_FL2V_NEGATIVE,

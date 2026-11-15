@@ -2744,6 +2744,11 @@ class MiniMaxH3DirectorEditor {
                     const clean = sanitizeSegmentForPayload(s);
                     return {
                         id: clean.id,
+                        // Identity must travel with the segment (queue payload,
+                        // director packs, re-imports): the seed ledger is keyed
+                        // by recordId, so a whitelisted payload that drops it
+                        // re-breaks pack round-trips.
+                        recordId: clean.recordId || "",
                         start: clean.start,
                         length: clean.frameCount ?? clean.length ?? 1,
                         frameCount: clean.frameCount ?? clean.length ?? 1,
@@ -4474,22 +4479,49 @@ class MiniMaxH3DirectorEditor {
             // identical, so the identity survives unsaved refreshes.
             const kind = bucket === timeline.segments ? "seg" : "shot";
             const storeKey = `minimaxH3_ids_${this.node.id}_${cacheName}_${kind}`;
-            const sig = JSON.stringify(bucket.map((s) => [
-                s?.startFrame ?? s?.start ?? null,
-                s?.endFrame ?? s?.end ?? null,
-            ]));
+            // Content-addressed identity reuse (v2 store): ids are remembered
+            // per segment *content key*, not per position, so reordering a
+            // segment keeps its id — and with it its seed ledger row —
+            // instead of minting a fresh id for the whole bucket.
+            const keyOf = (s) => {
+                const a = s?.startFrame ?? s?.start ?? "";
+                const b = s?.endFrame ?? s?.end ?? "";
+                const c = s?.length ?? s?.frameCount ?? s?.durationSec ?? "";
+                return `${a}|${b}|${c}`;
+            };
             let saved = null;
             try { saved = JSON.parse(localStorage.getItem(storeKey) || "null"); } catch { saved = null; }
-            const reuse = saved && saved.sig === sig && Array.isArray(saved.ids) ? saved.ids : null;
-            bucket.forEach((seg, i) => {
+            const pools = {};
+            const validId = (v) => /^[A-Za-z0-9_-]{1,64}$/.test(String(v ?? ""));
+            if (saved && saved.v === 2 && saved.keys && typeof saved.keys === "object") {
+                for (const [k, ids] of Object.entries(saved.keys)) {
+                    if (Array.isArray(ids)) pools[k] = ids.filter(validId);
+                }
+            } else if (saved && Array.isArray(saved.ids)) {
+                // v1 store was position/sig based; seed the pools best-effort.
+                let oldSigs = null;
+                try { oldSigs = JSON.parse(saved.sig || "[]"); } catch { oldSigs = null; }
+                saved.ids.forEach((id, i) => {
+                    if (!validId(id)) return;
+                    const sigRow = Array.isArray(oldSigs) ? oldSigs[i] : null;
+                    const k = Array.isArray(sigRow) ? `${sigRow[0] ?? ""}|${sigRow[1] ?? ""}|` : `pos:${i}`;
+                    (pools[k] ||= []).push(String(id));
+                });
+            }
+            bucket.forEach((seg) => {
                 if (seg && typeof seg === "object" && !seg.recordId) {
-                    const old = reuse ? String(reuse[i] ?? "") : "";
-                    seg.recordId = /^[A-Za-z0-9_-]{1,64}$/.test(old) ? old : this.generateRecordId();
+                    const pool = pools[keyOf(seg)] || [];
+                    const old = pool.shift();
+                    seg.recordId = old || this.generateRecordId();
                     changed = true;
                 }
             });
+            const keys = {};
+            bucket.forEach((seg) => {
+                if (seg && typeof seg === "object" && seg.recordId) (keys[keyOf(seg)] ||= []).push(seg.recordId);
+            });
             try {
-                localStorage.setItem(storeKey, JSON.stringify({ sig, ids: bucket.map((s) => s?.recordId || null) }));
+                localStorage.setItem(storeKey, JSON.stringify({ v: 2, keys }));
             } catch { /* storage may be unavailable; id reuse stays best-effort */ }
         }
         if (changed) this.commit(false, { syncTimeline: true });

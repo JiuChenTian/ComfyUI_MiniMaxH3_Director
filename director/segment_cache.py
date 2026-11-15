@@ -1950,7 +1950,11 @@ def migrate_seed_records(node_id: str | None, mapping: dict[int, str]) -> int:
             if row is None:
                 continue
             row["recordId"] = str(record_id)
-            row.pop("index", None)
+            # Keep the index on the renamed identity row: it is what lets
+            # migrate re-attach the row by position after a later identity
+            # churn (unsaved refresh / pack re-import). Popping it here made
+            # every migrated row permanently unrescuable.
+            row["index"] = int(index)
             try:
                 _write_via_temp(
                     target,
@@ -1960,16 +1964,45 @@ def migrate_seed_records(node_id: str | None, mapping: dict[int, str]) -> int:
                 moved += 1
             except Exception:
                 continue
-        # Re-key orphan identity rows: if the workflow was never re-saved after
-        # recordIds were first generated, a refresh mints fresh ids and the old
-        # rows would never match. Rows still carry their segment index, so when
-        # their id is absent from the current mapping we can re-attach them to
-        # the segment currently sitting at that index.
         current_ids = {str(v) for v in mapping.values() if v}
         by_index = {}
         for index, record_id in mapping.items():
             if record_id and _SEED_RECORD_ID_RE.match(str(record_id)):
                 by_index[int(index)] = str(record_id)
+        # Refresh / backfill the index on rows whose identity is still current.
+        # The row index is the only positional clue left after an identity
+        # churn, so it must describe the segment's *current* slot: after a
+        # reorder the seed row follows its segment, and a later churn re-keys
+        # it onto the same segment instead of whatever occupies the old slot
+        # (seed records must follow moved segments, never swap placeholders).
+        # Rows written before v5 (or restored from older packs) may lack an
+        # index entirely; the map backfills it so they become rescuable too.
+        id_to_index = {rid: idx for idx, rid in by_index.items()}
+        for path2 in root.glob(f"rec_*{SEED_RECORD_SUFFIX}"):
+            match = _SEED_RECORD_ID_NAME_RE.match(path2.name)
+            if not match:
+                continue
+            rid = match.group(1)
+            idx = id_to_index.get(rid)
+            if idx is None:
+                continue
+            row = _seed_record_load(path2)
+            if not row or row.get("index") == idx:
+                continue
+            row["index"] = idx
+            row["recordId"] = rid
+            try:
+                _write_via_temp(
+                    path2,
+                    lambda p, r=row: p.write_text(json.dumps(r), encoding="utf-8"),
+                )
+            except Exception:
+                continue
+        # Re-key orphan identity rows: if the workflow was never re-saved after
+        # recordIds were first generated, a refresh mints fresh ids and the old
+        # rows would never match. Rows still carry their segment index, so when
+        # their id is absent from the current mapping we can re-attach them to
+        # the segment currently sitting at that index.
         for path in root.glob(f"rec_*{SEED_RECORD_SUFFIX}"):
             match = _SEED_RECORD_ID_NAME_RE.match(path.name)
             if not match:
@@ -2065,6 +2098,14 @@ def put_seed_records(node_id: str | None, records: list[dict[str, Any]]) -> int:
                     clean[key] = int(val)
                 except (TypeError, ValueError):
                     continue
+            # Keep the row's index too: restored pack rows must stay rescuable
+            # by position if this node's identities churn again later.
+            idx_val = row.get("index")
+            if idx_val is not None:
+                try:
+                    clean["index"] = int(idx_val)
+                except (TypeError, ValueError):
+                    pass
             if not clean:
                 continue
             path = _seed_record_path(
